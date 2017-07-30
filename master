@@ -1,0 +1,318 @@
+#include <Wire.h>
+#include <Adafruit_AM2315.h>
+#include <math.h>
+#include <OneWire.h>
+
+#define StartConvert 0     //for EC temp
+#define ReadTemperature 1   //for EC temp
+
+
+
+Adafruit_AM2315 am2315;
+
+
+const int solenoidPin = 22;    // set solenoid control to pin 12
+const int fanrelayPin = 3;   // set fan outlet to pin 26
+const int phdownrelayPin = 4;   // set pH doser to pin 51
+const int phprobePin = A11;    // set pH probe pin to A1
+const int parPin = A7;        // set par meter pin to A8
+const int LEDPin = 2;        // set LED pin to pin 10 for PWM
+const int ecprobePin = A10;    // set EC probe to A10
+const int nutrirelayPin = 6;          // set nutrient doser pin to 30
+const int Relay_4 = 5;
+byte DS18B20_Pin = 32;         // DS18B20 signal, pin on digital 2
+
+OneWire ds(DS18B20_Pin);
+
+
+const int tempThreshold = 75;   // set temp threshold to 75 degrees
+const int humidThreshold = 42;  // set humidity threshold to 42
+const int phThreshold = 6;      // set pH threshold to 6.0
+const int ECThreshold = 1.5;     // set EC threshold to 1.
+
+float temperature,ECcurrent; 
+
+float TempProcess(bool ch)
+{
+  //returns the temperature from one DS18B20 in DEG Celsius
+  static byte data[12];
+  static byte addr[8];
+  static float TemperatureSum;
+  if(!ch){
+          if ( !ds.search(addr)) {
+              Serial.println("no more sensors on chain, reset search!");
+              ds.reset_search();
+              return 0;
+          }      
+          if ( OneWire::crc8( addr, 7) != addr[7]) {
+              Serial.println("CRC is not valid!");
+              return 0;
+          }        
+          if ( addr[0] != 0x10 && addr[0] != 0x28) {
+              Serial.print("Device is not recognized!");
+              return 0;
+          }      
+          ds.reset();
+          ds.select(addr);
+          ds.write(0x44,1); // start conversion, with parasite power on at the end
+  }
+  else{  
+          byte present = ds.reset();
+          ds.select(addr);    
+          ds.write(0xBE); // Read Scratchpad            
+          for (int i = 0; i < 9; i++) { // we need 9 bytes
+            data[i] = ds.read();
+          }         
+          ds.reset_search();           
+          byte MSB = data[1];
+          byte LSB = data[0];        
+          float tempRead = ((MSB << 8) | LSB); //using two's compliment
+          TemperatureSum = tempRead / 16;
+    }
+          return TemperatureSum;  
+
+}
+
+void setup() {
+    Serial.begin(9600);
+    analogReference(INTERNAL1V1);
+    if (! am2315.begin()) {
+     Serial.println("Sensor not found, check wiring & pullups!");
+  }
+ 
+  TempProcess(StartConvert);   //let the DS18B20 start the convert
+
+  digitalWrite(fanrelayPin, HIGH);
+  digitalWrite(phdownrelayPin, HIGH);       //sets relay pins to high (deactivate normally closed)
+  digitalWrite(nutrirelayPin, HIGH);
+  digitalWrite(Relay_4, HIGH); 
+
+  pinMode(solenoidPin, OUTPUT);           //Sets the pins as outputs
+  pinMode(fanrelayPin, OUTPUT);
+  pinMode(phprobePin, OUTPUT);  
+  pinMode(phdownrelayPin, OUTPUT);
+  pinMode(nutrirelayPin, OUTPUT);
+
+}
+ 
+
+
+
+
+
+void loop() {
+  
+  
+  // SOLENOID TIMER
+  digitalWrite(solenoidPin, HIGH);    //Switch Solenoid ON
+  delay(5000);                      //Wait 5 Second
+  digitalWrite(solenoidPin, LOW);     //Switch Solenoid OFF
+  delay(5000);                      //Wait 60 Second
+  
+  
+  
+  
+  
+  // TEMP AND HUMID VISUAL WRITE OUT   //white to I2C clock yellow to I2C data
+  
+  unsigned long currentFanMillis = millis();   // test and adjust fan every 3 min
+  unsigned long previousFanMillis = 0;        // will store last time fan was updated
+  const long Faninterval = 31000;           // constants won't change 
+
+  if (currentFanMillis - previousFanMillis >= Faninterval) {           // save the last time you checked fan
+    previousFanMillis = currentFanMillis;
+  
+
+    Serial.print("Hum: "); 
+    Serial.println(am2315.readHumidity());  // air humididty print out
+    delay(3000);                            // wait 3 seconds
+  
+    float farenheit = (am2315.readTemperature() * 1.8) + 32; 
+    Serial.print("Temp: "); 
+    Serial.println(farenheit);              // air temp print out
+    delay(3000);                            // wait 3 seconds
+  
+  
+  
+  //FAN CONTROL BY TEMP AND HUMID THRESHOLD
+  
+  if ((farenheit <= tempThreshold) & (am2315.readHumidity() <= humidThreshold)) {
+      digitalWrite(fanrelayPin, HIGH);
+      }
+      
+  else {
+    digitalWrite(fanrelayPin, LOW);
+    }
+    
+  }
+  
+
+
+
+
+  //PH PROBE WRITE OUT
+  
+  
+  unsigned long currentpHMillis = millis();   // test and adjust pH every 60 min
+  unsigned long previouspHMillis = 0;        // will store last time pH was updated
+  const long pHinterval = 31000;           // constants won't change 
+
+
+  if (currentpHMillis - previouspHMillis >= pHinterval) {
+      previouspHMillis = currentpHMillis;
+  
+   unsigned long int avgValue;  //Store the average value of the sensor feedback
+   float b;
+   int buf[10],temp;
+
+
+  for(int i=0;i<10;i++)       //Get 10 sample value from the sensor for smooth the value
+  { 
+    buf[i]=analogRead(phprobePin);
+    delay(10);
+  }
+  for(int i=0;i<9;i++)        //sort the analog from small to large
+  {
+    for(int j=i+1;j<10;j++)
+    {
+      if(buf[i]>buf[j])
+      {
+        temp=buf[i];
+        buf[i]=buf[j];
+        buf[j]=temp;
+      }
+    }
+  }
+  avgValue=0;
+  for(int i=2;i<8;i++)                      // take the average value of 6 center sample
+    avgValue+=buf[i];
+  float phValue=(float)avgValue*5.0/1024/6; // convert the analog into millivolt
+  phValue=3.5*phValue;                      // convert the millivolt into pH value
+ 
+      Serial.print("pH:");                       // print out pH value 
+      Serial.println(phValue,2);
+
+  
+  
+//PH PUMP CONTROL BASED ON PROBE READING
+
+  if (phValue >= phThreshold) {           // if pH is over threshold 
+    digitalWrite(phdownrelayPin, LOW);        // activate pH down pump
+    delay(5000);                          // wait 5 seconds
+    digitalWrite(phdownrelayPin, HIGH);         // deactivate pH down pump
+    }
+  }
+    
+//LED CONTROL BASED ON PAR READING
+
+unsigned long currentLEDMillis = millis();  // read and adjust lighting every 5 minutes
+unsigned long previousLEDMillis = 0;        // will store last time LED was updated
+const long LEDinterval = 13000;           // constants won't change 
+
+
+if (currentLEDMillis - previousLEDMillis >= LEDinterval) {
+    previousLEDMillis = currentLEDMillis;
+
+
+  int sensorValue = analogRead(parPin);  // Convert the analog reading (which goes from 0 - 1023) to a voltage (0 - 5000mV)
+  float mVoltage = (sensorValue * (1.1 / 1023.0)) * 1000.0;
+  float PWMpercent = 1 - (mVoltage / 78) ; // convert to remaining percentage of voltage needed for DLI
+  int PWMvalue = PWMpercent * 255;
+  int PWMcurrent = 0;
+  int PWMdisplay = PWMpercent * 100;
+  delay(4000);
+
+  
+    if (PWMpercent <= 0) {    //if reamining percentage of voltage needed for DLI is less than or equal to 0
+      analogWrite(LEDPin, 0);        // turn off LEDs
+      PWMcurrent = 0;
+      delay(4000);
+    }
+  
+    else {      // if remaining percetage of voltage needed for DLI is above 0
+      PWMcurrent = PWMvalue + PWMcurrent;
+      analogWrite(LEDPin, PWMcurrent);    // set the LED pin PWM value to the reaminder percentage need plus the current value
+      delay(4000);
+
+
+    }
+     
+  // print out the value read:
+        Serial.print("mV= ");
+        Serial.println(mVoltage);
+        Serial.print("PWM Percent = ");
+        Serial.print(PWMdisplay);
+        Serial.println(" % ");
+        delay(5000);
+    }
+
+//NUTRIENT DOSER BASED ON EC AND WATER TEMP READINGS
+
+unsigned long currentECMillis = millis();  // read and adjust EC every 5 minutes
+unsigned long previousECMillis = 0;        // will store last time EC was updated
+const long ECinterval = 17000;           // constants won't change 
+
+if (currentECMillis - previousECMillis >= ECinterval) { // save the last time you checked the EC
+    previousECMillis = currentECMillis;
+    
+  temperature = TempProcess(ReadTemperature);  // read the current temperature from the  DS18B20
+  TempProcess(StartConvert);                   
+    
+  unsigned long int avgValue;  //Store the average value of the sensor feedback
+  float b;
+  int buf[10],temp;
+
+  for(int i=0;i<10;i++)       //Get 10 sample value from the sensor for smooth the value
+  { 
+    buf[i]=analogRead(ecprobePin);
+    delay(10);
+  }
+  for(int i=0;i<9;i++)        //sort the analog from small to large
+  {
+    for(int j=i+1;j<10;j++)
+    {
+      if(buf[i]>buf[j])
+      {
+        temp=buf[i];
+        buf[i]=buf[j];
+        buf[j]=temp;
+      }
+    }
+  }
+  avgValue=0;
+  for(int i=2;i<8;i++)                      //take the average value of 6 center sample
+    avgValue+=buf[i];
+    
+  float averageVoltage=(float)avgValue*5000/1024/6; //convert the analog into millivolt
+  float TempCoefficient=1.0+0.0185*(temperature-25.0);    //temperature compensation formula: fFinalResult(25^C) = fFinalResult(current)/(1.0+0.0185*(fTP-25.0));
+  float CoefficientVolatge=(float)averageVoltage/TempCoefficient;   
+    
+    if(CoefficientVolatge<60)Serial.println("No solution!");   //25^C 1413us/cm<-->about 216mv  if the voltage(compensate)<150,that is <1ms/cm,out of the range
+    else if(CoefficientVolatge>2000)Serial.println("Out of the range!");  //>20ms/cm,out of the range
+    else
+    { 
+      if(CoefficientVolatge<=448)ECcurrent=8.5*CoefficientVolatge-0.12;   //1ms/cm<EC<=3ms/cm
+      else if(CoefficientVolatge<=1457)ECcurrent=10.75*CoefficientVolatge-0.12;  //3ms/cm<EC<=10ms/cm
+      else ECcurrent=8.5*CoefficientVolatge+2278;                           //10ms/cm<EC<20ms/cm
+      ECcurrent/=1000;    //convert us/cm to ms/cm
+    }
+
+  Serial.print("EC Value:");  
+  Serial.print(ECcurrent,2);
+  Serial.println("ms/cm");
+
+      if (ECcurrent <= ECThreshold) {           // if EC is under threshold 
+       digitalWrite(nutrirelayPin, LOW);        // activate nutrient pump
+       delay(5000);                          // wait 5 seconds
+       digitalWrite(nutrirelayPin, HIGH);         // deactivate nutrient pump
+      }
+    }
+    
+  }
+
+  
+    
+    
+    
+    
+  
